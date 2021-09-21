@@ -34,108 +34,157 @@ int main(int argc, char *argv[])
         if (clientId.startsWith('/'))
             clientId.remove(0, 1);
 
-        qDebug() << "new connection from" << client->peerAddress() << clientId;
+        qInfo() << "new connection from" << client->peerAddress() << clientId;
 
         QObject::connect(client, &QWebSocket::textMessageReceived, [client, clientId, &manager, &request](const QString &message){
-            qDebug() << "received" << client->peerAddress() << clientId /*<< message*/;
-
             QJsonParseError error;
             QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
             if (error.error != QJsonParseError::NoError)
             {
                 qWarning() << client->peerAddress() << client->requestUrl().path() << "could not parse json" << error.errorString();
+                qDebug() << message;
+                client->close(QWebSocketProtocol::CloseCodeBadOperation, QString{"could not parse json: %0"}.arg(error.errorString()));
                 return;
             }
 
             if (!doc.isArray())
             {
                 qWarning() << client->peerAddress() << client->requestUrl().path() << "json is not an array";
+                qDebug() << message;
+                client->close(QWebSocketProtocol::CloseCodeBadOperation, "json is not an array");
                 return;
             }
 
-            auto docArr = doc.array();
-
-            const qint64 uptime = docArr[0].toDouble();
-            const auto utc = QDateTime::fromMSecsSinceEpoch(docArr[1].toDouble());
-            const auto freememory8 = docArr[2].toInt();
-
             QString data;
-            data += QString{"system,host=%0 uptime=%1,freememory8=%2"}
-                    .arg(clientId)
-                    .arg(uptime)
-                    .arg(freememory8);
-
-            if (!docArr[3].isNull())
-                data += QString{",rssi=%0"}.arg(docArr[3].toInt());
-
-            data += QString{" %0\n"}.arg(utc.toMSecsSinceEpoch());
-
-            if (!docArr[4].isNull() || !docArr[5].isNull())
+            int i{};
+            for (const QJsonValue &recordVal : doc.array())
             {
-                data += QString{"inputs,host=%0,type=potis,kind=raw %1%2%3 %4\n"}
-                        .arg(clientId)
-                        .arg(!docArr[4].isNull() ? QString{"gas=%0"}.arg(docArr[4].toInt()) : "")
-                        .arg(!docArr[4].isNull() && !docArr[5].isNull() ? "," : "")
-                        .arg(!docArr[5].isNull() ? QString{"brems=%0"}.arg(docArr[5].toInt()) : "")
-                    .arg(utc.toMSecsSinceEpoch());
-            }
+                const auto recordIndex = i++;
 
-            if (!docArr[6].isNull() || !docArr[7].isNull())
-            {
-                data += QString{"inputs,host=%0,type=potis,kind=processed %1%2%3 %4\n"}
-                        .arg(clientId)
-                        .arg(!docArr[6].isNull() ? QString{"gas=%0"}.arg(docArr[6].toDouble()) : "")
-                        .arg(!docArr[6].isNull() && !docArr[7].isNull() ? "," : "")
-                        .arg(!docArr[7].isNull() ? QString{"brems=%0"}.arg(docArr[7].toDouble()) : "")
-                    .arg(utc.toMSecsSinceEpoch());
-            }
+                if (!recordVal.isArray())
+                {
+                    qWarning() << client->peerAddress() << client->requestUrl().path() << "json record" << recordIndex << "is not an array";
+                    qDebug() << message;
+                    client->close(QWebSocketProtocol::CloseCodeBadOperation, QString{"json record %0 is not an array"}.arg(recordIndex));
+                    return;
+                }
 
-            const auto addController = [&](const QJsonArray &controller, const QString &board){
-                data += QString{"measure,host=%0,board=%1 voltage=%2,temperature=%3 %4\n"}
+                const auto &record = recordVal.toArray();
+
+                if (record[0].isNull())
+                {
+                    qWarning() << client->peerAddress() << client->requestUrl().path() << "json record" << recordIndex << "has invalid uptime";
+                    qDebug() << message;
+                    client->close(QWebSocketProtocol::CloseCodeBadOperation, QString{"json record %0 has invalid uptime"}.arg(recordIndex));
+                    return;
+                }
+
+                if (record[1].isNull())
+                {
+                    qWarning() << client->peerAddress() << client->requestUrl().path() << "json record" << recordIndex << "has invalid utc time";
+                    qDebug() << message;
+                    client->close(QWebSocketProtocol::CloseCodeBadOperation, QString{"json record %0 has invalid utc time"}.arg(recordIndex));
+                    return;
+                }
+
+                if (record[2].isNull())
+                {
+                    qWarning() << client->peerAddress() << client->requestUrl().path() << "json record" << recordIndex << "has invalid freememory8";
+                    qDebug() << message;
+                    client->close(QWebSocketProtocol::CloseCodeBadOperation, QString{"json record %0 has invalid freememory8"}.arg(recordIndex));
+                    return;
+                }
+
+                const auto utc = QDateTime::fromMSecsSinceEpoch(record[1].toDouble());
+
+                data += QString{"system,host=%0 uptime=%1,freememory8=%2"}
                         .arg(clientId)
-                        .arg(board)
-                        .arg(controller[0].toDouble())
-                        .arg(controller[1].toDouble())
+                        .arg(record[0].toDouble())
+                        .arg(record[2].toInt());
+
+                if (!record[3].isNull())
+                    data += QString{",rssi=%0"}.arg(record[3].toInt());
+
+                data += QString{" %0\n"}.arg(utc.toMSecsSinceEpoch());
+
+                if (!record[4].isNull() || !record[5].isNull())
+                {
+                    data += QString{"inputs,host=%0,type=potis,kind=raw %1%2%3 %4\n"}
+                            .arg(clientId)
+                            .arg(!record[4].isNull() ? QString{"gas=%0"}.arg(record[4].toInt()) : "")
+                            .arg(!record[4].isNull() && !record[5].isNull() ? "," : "")
+                            .arg(!record[5].isNull() ? QString{"brems=%0"}.arg(record[5].toInt()) : "")
                         .arg(utc.toMSecsSinceEpoch());
+                }
 
-                const auto addMotor = [&](const QJsonArray &motor, const QString &board, const QString &side){
-                    data += QString{"command,host=%0,board=%1,side=%2 inputTgt=%3 %4\n"}
+                if (!record[6].isNull() || !record[7].isNull())
+                {
+                    data += QString{"inputs,host=%0,type=potis,kind=processed %1%2%3 %4\n"}
+                            .arg(clientId)
+                            .arg(!record[6].isNull() ? QString{"gas=%0"}.arg(record[6].toDouble()) : "")
+                            .arg(!record[6].isNull() && !record[7].isNull() ? "," : "")
+                            .arg(!record[7].isNull() ? QString{"brems=%0"}.arg(record[7].toDouble()) : "")
+                        .arg(utc.toMSecsSinceEpoch());
+                }
+
+                const auto addController = [&](const QJsonArray &controller, const QString &board){
+                    data += QString{"measure,host=%0,board=%1 voltage=%2,temperature=%3 %4\n"}
                             .arg(clientId)
                             .arg(board)
-                            .arg(side)
-                            .arg(motor[0].toInt())
+                            .arg(controller[0].toDouble())
+                            .arg(controller[1].toDouble())
                             .arg(utc.toMSecsSinceEpoch());
-                    data += QString{"measure,host=%0,board=%1,side=%2 speed=%3,current=%4,error=%5 %6\n"}
-                            .arg(clientId)
-                            .arg(board)
-                            .arg(side)
-                            .arg(motor[1].toDouble())
-                            .arg(motor[2].toDouble())
-                            .arg(motor[3].toInt())
-                            .arg(utc.toMSecsSinceEpoch());
+
+                    const auto addMotor = [&](const QJsonArray &motor, const QString &board, const QString &side){
+                        data += QString{"command,host=%0,board=%1,side=%2 inputTgt=%3 %4\n"}
+                                .arg(clientId)
+                                .arg(board)
+                                .arg(side)
+                                .arg(motor[0].toInt())
+                                .arg(utc.toMSecsSinceEpoch());
+                        data += QString{"measure,host=%0,board=%1,side=%2 speed=%3,current=%4,error=%5 %6\n"}
+                                .arg(clientId)
+                                .arg(board)
+                                .arg(side)
+                                .arg(motor[1].toDouble())
+                                .arg(motor[2].toDouble())
+                                .arg(motor[3].toInt())
+                                .arg(utc.toMSecsSinceEpoch());
+                    };
+
+                    addMotor(controller[2].toArray(), board, "left");
+                    addMotor(controller[3].toArray(), board, "right");
                 };
 
-                addMotor(controller[2].toArray(), board, "left");
-                addMotor(controller[3].toArray(), board, "right");
-            };
+                if (!record[8].isNull())
+                    addController(record[8].toArray(), "front");
 
-            if (!docArr[8].isNull())
-                addController(docArr[8].toArray(), "front");
+                if (!record[9].isNull())
+                    addController(record[9].toArray(), "back");
+            }
 
-            if (!docArr[9].isNull())
-                addController(docArr[9].toArray(), "back");
+            if (data.isEmpty())
+            {
+                qWarning() << "received empty from" << client->peerAddress() << clientId;
+                qDebug() << message;
+                return;
+            }
 
             QNetworkReply *reply = manager.post(request, data.toUtf8());
-            QObject::connect(reply, &QNetworkReply::finished, reply, [reply](){
-                if (reply->error() != QNetworkReply::NoError)
-                    qWarning() << "request finished" << reply->error() << reply->errorString();
-                //qDebug() << reply->readAll();
+            QObject::connect(reply, &QNetworkReply::finished, reply, [client, clientId, reply](){
+                if (reply->error() == QNetworkReply::NoError)
+                    qInfo() << "saved successfully" << client->peerAddress() << clientId;
+                else
+                {
+                    qWarning() << "error while saving" << reply->error() << reply->errorString();
+                    qDebug() << reply->readAll();
+                }
                 reply->deleteLater();
             });
         });
 
         QObject::connect(client, &QWebSocket::disconnected, [](){
-            qDebug() << "disconnected";
+            qInfo() << "disconnected";
         });
     });
 
